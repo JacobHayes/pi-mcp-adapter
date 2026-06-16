@@ -142,6 +142,8 @@ Pi-specific files are the write targets for imported or shared global servers wh
 
 For pre-registered browser OAuth clients, set `oauth.redirectUri` to the exact callback registered with the provider, for example `"http://localhost:3118/callback"`. Dynamic clients normally omit it and use a lazy OS-assigned localhost callback port.
 
+OAuth entries are stored in the system keyring by default. Set `MCP_OAUTH_DIR` only when you explicitly want file-backed storage, for example in tests or controlled headless environments.
+
 ### Remote/headless OAuth
 
 If Pi is running on a remote server and cannot open a local browser, start OAuth through the proxy tool:

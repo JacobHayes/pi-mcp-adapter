@@ -4,14 +4,22 @@
  * Handles secure storage of OAuth credentials, tokens, client information,
  * and PKCE state for MCP servers.
  * 
- * Token storage location: $MCP_OAUTH_DIR/sha256-<server-hash>/tokens.json when set,
- * otherwise <Pi agent dir>/mcp-oauth/sha256-<server-hash>/tokens.json
+ * Default storage location: system keyring, under service
+ * `pi-mcp-adapter.oauth` and account `sha256-<agent-dir+server-hash>`. The
+ * account incorporates the agent dir so PI_CODING_AGENT_DIR-isolated profiles
+ * do not collide on a shared server name.
+ *
+ * Explicit file storage/testing override: when $MCP_OAUTH_DIR is set, auth
+ * entries are stored at $MCP_OAUTH_DIR/sha256-<server-hash>/tokens.json.
+ * Legacy file entries under <Pi agent dir>/mcp-oauth are migrated into the
+ * keyring on first read when keyring storage is active.
  */
 
-import { createHash } from 'crypto';
-import { mkdirSync, readFileSync, writeFileSync, existsSync, rmSync } from 'fs';
-import { join } from 'path';
-import { getAgentPath } from './agent-dir.ts';
+import { createHash } from 'node:crypto';
+import { mkdirSync, readFileSync, writeFileSync, existsSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { getAgentDir, getAgentPath } from './agent-dir.ts';
+import { deleteKeyringSecret, readKeyringSecret, writeKeyringSecret } from './mcp-auth-keyring.ts';
 
 /** OAuth token storage format */
 export interface StoredTokens {
@@ -39,25 +47,63 @@ export interface AuthEntry {
   serverUrl?: string; // Track the URL these credentials are for
 }
 
-// Base directory for auth storage - can be overridden via env var for testing
+type AuthStorageBackend = 'keyring' | 'file';
+
+// Base directory for legacy/file auth storage - can be overridden via env var for testing.
 function getAuthBaseDir(): string {
   const override = process.env.MCP_OAUTH_DIR?.trim();
   return override ? override : getAgentPath('mcp-oauth');
 }
 
-/**
- * Get the server-specific directory path.
- */
-function getServerDir(serverName: string): string {
+function getStorageBackend(): AuthStorageBackend {
+  return process.env.MCP_OAUTH_DIR?.trim() ? 'file' : 'keyring';
+}
+
+function assertValidServerName(serverName: string): void {
   if (typeof serverName !== 'string') {
     throw new Error(`Invalid MCP server name: ${JSON.stringify(serverName)}`);
   }
-  const storageKey = createHash('sha256').update(serverName, 'utf8').digest('hex');
-  return join(getAuthBaseDir(), `sha256-${storageKey}`);
 }
 
 /**
- * Get the tokens file path for a server.
+ * Storage key for the legacy/file backend. The file path is already nested
+ * under the agent dir (see getAuthBaseDir), so this is scoped by server name
+ * only.
+ */
+function getServerStorageKey(serverName: string): string {
+  assertValidServerName(serverName);
+  const storageKey = createHash('sha256').update(serverName, 'utf8').digest('hex');
+  return `sha256-${storageKey}`;
+}
+
+/**
+ * Keyring account for a server. Unlike the file backend, the keyring is a flat
+ * namespace per OS user, so the account must incorporate the agent dir to keep
+ * PI_CODING_AGENT_DIR-isolated profiles from colliding when they share a server
+ * name. The null-byte separator prevents dir/name prefix ambiguity.
+ */
+function getKeyringStorageKey(serverName: string): string {
+  assertValidServerName(serverName);
+  const storageKey = createHash('sha256')
+    .update(getAgentDir(), 'utf8')
+    .update('\0')
+    .update(serverName, 'utf8')
+    .digest('hex');
+  return `sha256-${storageKey}`;
+}
+
+/**
+ * Get the server-specific legacy/file storage directory path.
+ */
+function getServerDir(serverName: string): string {
+  return join(getAuthBaseDir(), getServerStorageKey(serverName));
+}
+
+/**
+ * Get the legacy/file tokens path for a server.
+ *
+ * When keyring storage is active this path is only used for migration and for
+ * callers that explicitly need to inspect the legacy location.
  */
 export function getAuthEntryFilePath(serverName: string): string {
   return join(getServerDir(serverName), 'tokens.json');
@@ -73,31 +119,90 @@ function ensureServerDir(serverName: string): void {
   }
 }
 
-/**
- * Read the auth entry for a server from disk.
- * Returns undefined if file doesn't exist.
- */
-function readAuthEntry(serverName: string): AuthEntry | undefined {
-  const filePath = getAuthEntryFilePath(serverName);
+function parseAuthEntry(data: string, source: string): AuthEntry {
   try {
-    if (!existsSync(filePath)) {
-      return undefined;
-    }
-    const data = readFileSync(filePath, 'utf-8');
     return JSON.parse(data) as AuthEntry;
   } catch (error) {
-    console.error(`Failed to read auth entry for ${serverName}:`, error);
-    return undefined;
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`Failed to parse auth entry from ${source}: ${message}`);
   }
 }
 
 /**
- * Write the auth entry for a server to disk with secure permissions.
+ * Read the auth entry for a server from legacy/file storage.
+ * Returns undefined if file doesn't exist.
  */
-function writeAuthEntry(serverName: string, entry: AuthEntry): void {
+function readFileAuthEntry(serverName: string): AuthEntry | undefined {
+  const filePath = getAuthEntryFilePath(serverName);
+  if (!existsSync(filePath)) {
+    return undefined;
+  }
+  const data = readFileSync(filePath, 'utf-8');
+  return parseAuthEntry(data, filePath);
+}
+
+/**
+ * Write the auth entry for a server to legacy/file storage with secure permissions.
+ */
+function writeFileAuthEntry(serverName: string, entry: AuthEntry): void {
   ensureServerDir(serverName);
   const filePath = getAuthEntryFilePath(serverName);
   writeFileSync(filePath, JSON.stringify(entry, null, 2), { mode: 0o600 });
+}
+
+function removeFileAuthEntry(serverName: string): void {
+  const dir = getServerDir(serverName);
+  if (existsSync(dir)) {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+function readKeyringAuthEntry(serverName: string): AuthEntry | undefined {
+  const storageKey = getKeyringStorageKey(serverName);
+  const data = readKeyringSecret(storageKey);
+  if (data === undefined) {
+    return undefined;
+  }
+  return parseAuthEntry(data, `system keyring account ${storageKey}`);
+}
+
+function writeKeyringAuthEntry(serverName: string, entry: AuthEntry): void {
+  writeKeyringSecret(getKeyringStorageKey(serverName), JSON.stringify(entry));
+}
+
+function removeKeyringAuthEntry(serverName: string): void {
+  deleteKeyringSecret(getKeyringStorageKey(serverName));
+}
+
+function readAuthEntry(serverName: string): AuthEntry | undefined {
+  if (getStorageBackend() === 'file') {
+    return readFileAuthEntry(serverName);
+  }
+
+  const keyringEntry = readKeyringAuthEntry(serverName);
+  if (keyringEntry) {
+    removeFileAuthEntry(serverName);
+    return keyringEntry;
+  }
+
+  const legacyEntry = readFileAuthEntry(serverName);
+  if (!legacyEntry) {
+    return undefined;
+  }
+
+  writeKeyringAuthEntry(serverName, legacyEntry);
+  removeFileAuthEntry(serverName);
+  return legacyEntry;
+}
+
+function writeAuthEntry(serverName: string, entry: AuthEntry): void {
+  if (getStorageBackend() === 'file') {
+    writeFileAuthEntry(serverName, entry);
+    return;
+  }
+
+  writeKeyringAuthEntry(serverName, entry);
+  removeFileAuthEntry(serverName);
 }
 
 /**
@@ -137,26 +242,12 @@ export function saveAuthEntry(serverName: string, entry: AuthEntry, serverUrl?: 
 
 /**
  * Remove auth entry for a server.
- * Also removes the server directory if empty.
  */
 export function removeAuthEntry(serverName: string): void {
-  try {
-    const filePath = getAuthEntryFilePath(serverName);
-    if (existsSync(filePath)) {
-      writeFileSync(filePath, '{}', { mode: 0o600 });
-    }
-    // Try to remove the directory
-    const dir = getServerDir(serverName);
-    if (existsSync(dir)) {
-      try {
-        rmSync(dir, { recursive: true });
-      } catch {
-        // Directory may not be empty, ignore
-      }
-    }
-  } catch (error) {
-    console.error(`Failed to remove auth entry for ${serverName}:`, error);
+  if (getStorageBackend() === 'keyring') {
+    removeKeyringAuthEntry(serverName);
   }
+  removeFileAuthEntry(serverName);
 }
 
 /**

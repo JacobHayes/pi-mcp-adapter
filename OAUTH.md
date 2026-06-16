@@ -20,7 +20,7 @@ The Pi MCP Adapter uses the official MCP SDK's built-in OAuth implementation, wh
 - ✅ **Auto-Discovery** - Discovers OAuth endpoints from server metadata
 - ✅ **Automatic Token Refresh** - SDK handles expired tokens automatically
 - ✅ **State Parameter Validation** - CSRF protection
-- ✅ **Secure Token Storage** - Stored in `~/.pi/agent/mcp-oauth/sha256-<server-hash>/tokens.json`
+- ✅ **Secure Token Storage** - Stored in the system keyring by default, with explicit file storage available via `MCP_OAUTH_DIR`
 
 ## Configuration
 
@@ -224,7 +224,9 @@ A Node.js HTTP server runs on a loopback callback endpoint and handles the activ
 
 ## Token Storage
 
-Tokens are stored per-server in `~/.pi/agent/mcp-oauth/sha256-<server-hash>/tokens.json`. The hash is derived from the configured MCP server name, so any valid config key can be used without becoming a filesystem path component:
+OAuth entries are stored per-server in the system keyring by default. The keyring service is `pi-mcp-adapter.oauth`; the account name is `sha256-<agent-dir-and-server-hash>`, where the hash is derived from the Pi agent directory, a null-byte separator, and the configured MCP server name.
+
+The stored auth entry shape is:
 
 ```json
 {
@@ -243,15 +245,20 @@ Tokens are stored per-server in `~/.pi/agent/mcp-oauth/sha256-<server-hash>/toke
 }
 ```
 
-Example directory structure:
+Set `MCP_OAUTH_DIR` to use explicit file-backed storage instead. In that mode, entries are written per-server to `$MCP_OAUTH_DIR/sha256-<server-hash>/tokens.json`. The hash is derived from the configured MCP server name, so any valid config key can be used without becoming a filesystem path component.
+
+Example file-backed directory structure:
+
 ```
-~/.pi/agent/mcp-oauth/
+$MCP_OAUTH_DIR/
 ├── sha256-<linear-server-name-hash>/
 │   └── tokens.json
 ├── sha256-<github-server-name-hash>/
 │   └── tokens.json
 └── ...
 ```
+
+Each `tokens.json` file contains the auth entry JSON shown above and is created with secure file permissions. When keyring storage is active, existing entries from `<Pi agent dir>/mcp-oauth/sha256-<server-hash>/tokens.json` are migrated into the keyring on first read and the plaintext file is removed.
 
 The `serverUrl` field ensures credentials are invalidated if the server URL changes.
 
@@ -265,9 +272,11 @@ All OAuth flows use PKCE with the S256 method, preventing authorization code int
 
 A cryptographically secure random state parameter is generated for each flow and validated on callback.
 
-### File Permissions
+### Storage Backend
 
-Token files (`tokens.json`) are created with `0o600` permissions and stored in hashed per-server directories with `0o700` permissions (readable only by owner).
+By default, OAuth entries are stored in the operating system keyring (macOS Keychain, Windows Credential Manager, or the platform keyring provider exposed by `@napi-rs/keyring`). Keyring failures are reported explicitly instead of silently falling back to plaintext files.
+
+When `MCP_OAUTH_DIR` is set, token files (`tokens.json`) are created with `0o600` permissions and stored in hashed per-server directories with `0o700` permissions (readable only by owner).
 
 ### URL Validation
 
@@ -316,7 +325,8 @@ If the browser fails to open (e.g., in SSH sessions), the authorization URL will
 
 The OAuth implementation uses the following modules:
 
-- `mcp-auth.ts` - Auth storage and retrieval (hashed per-server `tokens.json` files)
+- `mcp-auth.ts` - Auth storage and retrieval (system keyring by default, explicit hashed file storage via `MCP_OAUTH_DIR`)
+- `mcp-auth-keyring.ts` - System keyring adapter
 - `mcp-oauth-provider.ts` - SDK OAuthClientProvider implementation
 - `mcp-callback-server.ts` - Node.js HTTP callback server
 - `mcp-auth-flow.ts` - High-level auth flow using SDK transport
