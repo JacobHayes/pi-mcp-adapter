@@ -4,6 +4,7 @@ import { buildHostHtmlTemplate, type HostHtmlTemplateInput } from "../host-html-
 function createMinimalInput(overrides: Partial<HostHtmlTemplateInput> = {}): HostHtmlTemplateInput {
   return {
     sessionToken: "test-token-123",
+    appResourceToken: "app-token-456",
     serverName: "test-server",
     toolName: "test-tool",
     toolArgs: { arg1: "value1" },
@@ -53,6 +54,7 @@ describe("buildHostHtmlTemplate", () => {
 
       expect(html).toContain('<iframe id="mcp-app"');
       expect(html).toContain('referrerpolicy="no-referrer"');
+      expect(html).toContain('sandbox="allow-scripts"');
     });
 
     it("includes control buttons", () => {
@@ -155,6 +157,14 @@ describe("buildHostHtmlTemplate", () => {
 
       expect(html).toContain('const ALLOW_ATTRIBUTE = "camera; microphone"');
     });
+
+    it("does not grant same-origin access to the app iframe", () => {
+      const html = buildHostHtmlTemplate(createMinimalInput());
+
+      expect(html).toContain('sandbox="allow-scripts"');
+      expect(html).not.toContain("allow-same-origin");
+      expect(html).toContain('if (event.source !== iframe.contentWindow) return;');
+    });
   });
 
   describe("CSP handling", () => {
@@ -213,6 +223,16 @@ describe("buildHostHtmlTemplate", () => {
       );
 
       expect(html).toContain("https://cdn.example.com/app-bridge.js");
+    });
+
+    it("loads the app iframe with a separate non-proxy resource token", () => {
+      const html = buildHostHtmlTemplate(
+        createMinimalInput({ sessionToken: "secret-session-token", appResourceToken: "app-resource-token" })
+      );
+
+      expect(html).toContain('const APP_RESOURCE_TOKEN = "app-resource-token"');
+      expect(html).toContain('iframe.src = "/ui-app?app=" + encodeURIComponent(APP_RESOURCE_TOKEN)');
+      expect(html).not.toContain('/ui-app?session=');
     });
   });
 

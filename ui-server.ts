@@ -69,6 +69,7 @@ export interface UiServerHandle {
 
 export async function startUiServer(options: UiServerOptions): Promise<UiServerHandle> {
   const sessionToken = options.sessionToken ?? randomUUID();
+  const appResourceToken = randomUUID();
   const log = logger.child({ 
     component: "UiServer",
     server: options.serverName,
@@ -238,6 +239,7 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServerH
 
         const html = buildHostHtmlTemplate({
           sessionToken,
+          appResourceToken,
           serverName: options.serverName,
           toolName: options.toolName,
           toolArgs: options.toolArgs,
@@ -282,7 +284,7 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServerH
       }
 
       if (method === "GET" && url.pathname === "/ui-app") {
-        if (!validateTokenQuery(url, sessionToken, res)) return;
+        if (!validateAppResourceTokenQuery(url, appResourceToken, res)) return;
         touchHeartbeat();
         // Serve the MCP app's UI HTML directly (avoids blob URL security issues)
         // Apply CSP meta tag if specified in resource metadata
@@ -604,6 +606,15 @@ function validateTokenBody(
   res: ServerResponse,
 ): boolean {
   if (body.token !== expected) {
+    sendJson(res, 403, { ok: false, error: "Invalid session" });
+    return false;
+  }
+  return true;
+}
+
+function validateAppResourceTokenQuery(url: URL, expected: string, res: ServerResponse): boolean {
+  const token = url.searchParams.get("app");
+  if (token !== expected) {
     sendJson(res, 403, { ok: false, error: "Invalid session" });
     return false;
   }

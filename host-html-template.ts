@@ -5,6 +5,7 @@ const DEFAULT_APP_BRIDGE_MODULE_URL = "/app-bridge.bundle.js";
 
 export interface HostHtmlTemplateInput {
   sessionToken: string;
+  appResourceToken: string;
   serverName: string;
   toolName: string;
   toolArgs: Record<string, unknown>;
@@ -22,6 +23,7 @@ export function buildHostHtmlTemplate(input: HostHtmlTemplateInput): string {
   const hostContext = input.hostContext ?? {};
 
   const sessionToken = safeInlineJSON(input.sessionToken);
+  const appResourceToken = safeInlineJSON(input.appResourceToken);
   const toolArgs = safeInlineJSON(input.toolArgs);
   const uiHtml = safeInlineJSON(resourceHtml);
   const serverName = safeInlineJSON(input.serverName);
@@ -101,7 +103,7 @@ export function buildHostHtmlTemplate(input: HostHtmlTemplateInput): string {
     </div>
   </header>
   <main>
-    <iframe id="mcp-app" referrerpolicy="no-referrer"></iframe>
+    <iframe id="mcp-app" referrerpolicy="no-referrer" sandbox="allow-scripts"></iframe>
   </main>
   <div class="overlay" id="error-overlay">
     <div class="panel">
@@ -113,6 +115,7 @@ export function buildHostHtmlTemplate(input: HostHtmlTemplateInput): string {
     import { AppBridge, PostMessageTransport } from ${moduleUrl};
 
     const SESSION_TOKEN = ${sessionToken};
+    const APP_RESOURCE_TOKEN = ${appResourceToken};
     const SERVER_NAME = ${serverName};
     const TOOL_NAME = ${toolName};
     const TOOL_ARGS = ${toolArgs};
@@ -201,6 +204,7 @@ export function buildHostHtmlTemplate(input: HostHtmlTemplateInput): string {
     // Also listen for raw postMessage events with custom types (notify, prompt, intent, etc.)
     // These bypass the AppBridge protocol but are used by some MCP UI implementations
     window.addEventListener("message", async (event) => {
+      if (event.source !== iframe.contentWindow) return;
       const data = event.data;
       if (!data || typeof data !== "object") return;
       
@@ -275,7 +279,7 @@ export function buildHostHtmlTemplate(input: HostHtmlTemplateInput): string {
     const iframeLoaded = new Promise((resolve) => {
       iframe.onload = resolve;
     });
-    iframe.src = "/ui-app?session=" + encodeURIComponent(SESSION_TOKEN);
+    iframe.src = "/ui-app?app=" + encodeURIComponent(APP_RESOURCE_TOKEN);
     await iframeLoaded;
 
     const eventSource = new EventSource("/events?session=" + encodeURIComponent(SESSION_TOKEN));

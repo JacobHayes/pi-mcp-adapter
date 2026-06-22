@@ -242,6 +242,34 @@ describe("UiServer", () => {
     });
   });
 
+  describe("GET /ui-app", () => {
+    it("serves app HTML only with the separate app resource token", async () => {
+      handle = await startUiServer(createServerOptions());
+      const root = await request(`http://localhost:${handle.port}/?session=${handle.sessionToken}`);
+      const appToken = String(root.body).match(/APP_RESOURCE_TOKEN = "([^"]+)"/)?.[1];
+
+      expect(appToken).toBeTruthy();
+      expect(appToken).not.toBe(handle.sessionToken);
+      expect(String(root.body)).toContain('/ui-app?app=');
+      expect(String(root.body)).not.toContain('/ui-app?session=');
+
+      const res = await request(`http://localhost:${handle.port}/ui-app?app=${encodeURIComponent(appToken!)}`);
+
+      expect(res.status).toBe(200);
+      expect(res.headers["content-type"]).toContain("text/html");
+      expect(res.body).toContain("Test App");
+    });
+
+    it("does not accept the proxy session token as the app resource token", async () => {
+      handle = await startUiServer(createServerOptions());
+
+      const res = await request(`http://localhost:${handle.port}/ui-app?app=${handle.sessionToken}`);
+
+      expect(res.status).toBe(403);
+      expect(res.body).toEqual({ ok: false, error: "Invalid session" });
+    });
+  });
+
   describe("GET /health", () => {
     it("returns healthy status", async () => {
       handle = await startUiServer(createServerOptions());
